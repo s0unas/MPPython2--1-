@@ -21,7 +21,10 @@ class Solution:
         shortestpath = bfs_path(self.graph, self.isp, clients)
         
         #I then sorted the clients by highest payments.
-        sortedclients = sorted(clients, key=lambda c: payments[c], reverse=True)
+        def getpaymentval (client_id):
+            return payments[client_id]
+        
+        sortedclients = sorted(clients, key=getpaymentval, reverse=True)
         
         final_paths = {}
         for client_id in sortedclients:
