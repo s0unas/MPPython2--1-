@@ -1,12 +1,12 @@
-from Traversals import bfs_path
+from Traversals import bfs_path, dijkalgo
 import heapq
-from collections import deque
+from collections import deque, defaultdict, Counter
 from Simulator import Simulator
+from Revenue import Revenue
 import sys
-
+import collections
 
 class Solution:
-
     def __init__(self, problem, isp, graph, info):
         self.problem = problem
         self.isp = isp
@@ -14,90 +14,69 @@ class Solution:
         self.info = info
 
     def output_paths(self):
-        """
-        This method must be filled in by you. You may add other methods and subclasses as you see fit,
-        but they must remain within the Solution class.
-        """
-
         clients = self.info["list_clients"]
         payments = self.info["payments"]
-        bandwidths = self.info["bandwidths"]
         alphas = self.info.get("alphas", {})
+        bandwidths = self.info["bandwidths"]
+        isp_neighbors = self.graph[self.isp]
 
-        shortpath = bfs_path(self.graph, self.isp, clients)
-        # we sort clients by payment hhigh to Low
-        sorted_clients = sorted(clients, key=lambda c: payments[c], reverse=True)
+        # 1. PRE-CALCULATE BFS from every ISP neighbor
+        neighbor_maps = {}
+        for n in isp_neighbors:
+            neighbor_maps[n] = bfs_path(self.graph, n, clients)
+
+        # 2. Urgency Sort (Prioritizing the 'impatient' high-payers)
+        def get_priority(c):
+            a = alphas.get(c, 1.0)
+            return (payments[c] * 1000000) if a <= 1.0 else (payments[c] / a)
         
-        # usage[node][time_tick] = how many packets are using this node's bandwidth
-        usage = {node: {} for node in self.graph}
+        sorted_clients = sorted(clients, key=get_priority, reverse=True)
+
+        # 3. Smart Load Balancing
+        # reservation[node][time] = load
+        reservation = collections.defaultdict(lambda: collections.defaultdict(int))
         final_paths = {}
 
         for client_id in sorted_clients:
-            if client_id in shortpath:
-                shortestdist = len(shortpath[client_id]) - 1
-            else:
-                shortestdist = 100
-
-            clientalpha = alphas.get(client_id, 1.0)    
-            deadline = clientalpha * shortestdist
-
-            path = self.find_path(client_id, usage, bandwidths, deadline)
+            best_path = None
+            best_arrival_time = float('inf')
             
-            # 2. Update our internal traffic map
-            if path:
-                final_paths[client_id] = path
-                # Update usage tracker for each hop in the chosen path
-                for t, node in enumerate(path):
-                    if t not in usage[node]:
-                        usage[node][t] = 1
-                    else:
-                        usage[node][t] += 1
+            # 4. Check every neighbor's map to find the FASTEST arrival
+            for n in isp_neighbors:
+                if client_id not in neighbor_maps[n] or not neighbor_maps[n][client_id]:
+                    continue
+                
+                # Potential path: [ISP, Neighbor, ... Path to Client]
+                potential_path = [self.isp] + neighbor_maps[n][client_id]
+                
+                # Calculate what the ACTUAL delay will be in the simulator
+                # based on current reservations
+                simulated_time = 0
+                for i in range(len(potential_path) - 1):
+                    u = potential_path[i]
+                    # If this node is 'full' at this time, we wait (simulator logic)
+                    while reservation[u][simulated_time] >= bandwidths[u]:
+                        simulated_time += 1
+                    simulated_time += 1
+                
+                # We want the path that gets us there the EARLIEST
+                if simulated_time < best_arrival_time:
+                    best_arrival_time = simulated_time
+                    best_path = potential_path
+
+            # 5. Lock in the best path and reserve the slots
+            if best_path:
+                final_paths[client_id] = best_path
+                # Reserve the slots so the next client knows we're in the way
+                t = 0
+                for i in range(len(best_path) - 1):
+                    u = best_path[i]
+                    while reservation[u][t] >= bandwidths[u]:
+                        t += 1
+                    reservation[u][t] += 1
+                    t += 1
             else:
-                # Fallback to shortest path if no smart path is found within deadline
-                if client_id in shortpath:
-                    final_paths[client_id] = shortpath[client_id]
-                else:
-                    final_paths[client_id] = []
+                final_paths[client_id] = bfs_path(self.graph, self.isp, [client_id])[client_id]
 
         return (final_paths, {}, {})
-
-
-    def find_path(self, goal, usage, bandwidths, deadline):
-        # pq stores (total_delay, current_time, current_node, path_list)
-        pq = [(0, 0, self.isp, [self.isp])]
-        visited = {} # in here should be (node, time)
-
-        while pq:
-            delay, time, u, path = heapq.heappop(pq)
-
-            if u == goal:
-                return path
-
-            # check visited
-            if u in visited:
-                if visited[u] <= delay:
-                    continue
-            visited[u] = delay
-
-            if delay > deadline:
-                continue
-
-            for v in self.graph[u]:
-                #Calculate simulator queuing based on current traffic at time 'time'
-                if time in usage[u]:
-                    current_load = usage[u][time]
-                else:
-                    current_load = 0
-                
-                
-                # Each 'bandwidth' chunk of packets adds 1 tick of delay
-                queuing_delay = int(current_load // bandwidths[u])
-                
-                new_delay = delay + 1 + queuing_delay
-                arrival_time_at_v = time + 1 + queuing_delay
-                
-                # Only explore the neighbor if we stay within the deadline
-                if new_delay <= deadline:
-                    heapq.heappush(pq, (new_delay, arrival_time_at_v, v, path + [v]))
-
-        return []
+    
